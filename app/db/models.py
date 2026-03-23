@@ -18,5 +18,5 @@ class SensorData(Base):
     temperature = Column(Float)
     humidity = Column(Float)
     co2 = Column(Float)
-    timestamp = Column(DateTime, default=getNow())
-    timestamp_server = Column(DateTime, default=getNow())
+    timestamp = Column(DateTime, default=getNow)
+    timestamp_server = Column(DateTime, default=getNow)
