@@ -5,8 +5,19 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 from app.db.session import SessionLocal
 from app.db import models
-from app.core.config import MOSQUITTO_PORT, MOSQUITTO_HOST
+from app.core.config import MOSQUITTO_PORT, MOSQUITTO_HOST, MOSQUITTO_USER, MOSQUITTO_PASSWORD
+import logging
+from uvicorn.logging import DefaultFormatter
 
+logger = logging.getLogger("mqtt_service")
+handler = logging.StreamHandler()
+formatter = DefaultFormatter(
+    fmt="%(levelprefix)s [%(name)s] %(message)s",
+    use_colors=True,
+)
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 class MQTTService:
     def __init__(self, broker=MOSQUITTO_HOST, port=MOSQUITTO_PORT):
@@ -38,13 +49,14 @@ class MQTTService:
             pass
 
     def _run(self):
+        self.client.username_pw_set(MOSQUITTO_USER, MOSQUITTO_PASSWORD)
         self.client.connect(self.broker, self.port, 60)
         self.client.loop_start()
 
     # -------- callbacks --------
 
     def on_connect(self, client, userdata, flags, rc):
-        print("MQTT connected:", rc)
+        logger.info(f"Connected with result code {rc}")
         client.subscribe("sensors/+/data")
         client.subscribe("sensors/+/status")
 
@@ -54,14 +66,14 @@ class MQTTService:
         try:
             payload = msg.payload.decode()
         except Exception:
-            print("Decode error")
+            logger.info(f"Decode error")
             return
 
         if topic.endswith("/data"):
             self.handle_sensor_data(payload)
 
         elif topic.endswith("/status"):
-            print(f"[STATUS] {topic}: {payload}")
+            logger.info(f"[STATUS] {topic}: {payload}")
 
     # -------- data handler --------
 
@@ -69,7 +81,8 @@ class MQTTService:
         try:
             data = json.loads(payload)
         except json.JSONDecodeError:
-            print("Invalid JSON:", payload)
+            print()
+            logger.info(f"Invalid JSON: {payload}")
             return
 
         db: Session = SessionLocal()
@@ -91,7 +104,7 @@ class MQTTService:
             db.commit()
 
         except Exception as e:
-            print("DB error:", e)
+            logger.info(f"DB error: {e}")
             db.rollback()
 
         finally:
