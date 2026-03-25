@@ -20,3 +20,15 @@ class SensorData(Base):
     co2 = Column(Float)
     timestamp = Column(DateTime, default=getNow)
     timestamp_server = Column(DateTime, default=getNow)
+
+class MeteoData(Base):
+    __tablename__ = "meteo_data"
+    id = Column(Integer, primary_key=True, index=True)
+    getting_timestamp = Column(DateTime, default=getNow)
+    timestamp = Column(DateTime)
+    temperature_2m = Column(Float)
+    relative_humidity_2m = Column(Float)
+    wind_speed_10m = Column(Float)
+    wind_gusts_10m = Column(Float)
+    dew_point_1m = Column(Float)
+    shortwave_radiation = Column(Float)
