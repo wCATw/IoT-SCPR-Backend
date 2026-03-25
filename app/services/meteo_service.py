@@ -103,7 +103,7 @@ class MeteoService:
         """
         Загрузка исторических данных за N дней назад
         """
-        end = datetime.now(timezone.utc)
+        end = datetime.now()
         start = end - timedelta(days=days_back)
 
         logger.info(f"Loading history: {start} - {end}")
@@ -117,35 +117,100 @@ class MeteoService:
 
     async def _auto_loop(self, interval_hours: int, forecast_hours: int):
         """
-        interval_hours — как часто обновлять
+        Автообновление прогноза с защитой от дублей.
+        interval_hours — как часто запускать
         forecast_hours — на сколько часов вперед брать прогноз
         """
-
         while self.running:
             try:
-                now = datetime.utcnow()
+                now = datetime.now()
+
+                # -------- проверяем последнюю запись --------
+                db: Session = SessionLocal()
+                try:
+                    last_record = db.query(models.MeteoData) \
+                        .order_by(models.MeteoData.timestamp.desc()) \
+                        .first()
+                finally:
+                    db.close()
+
+                if last_record and last_record.timestamp >= now + timedelta(hours=forecast_hours):
+                    logger.info("Forecast already in DB, skipping fetch")
+                    await asyncio.sleep(interval_hours * 3600)
+                    continue
+
+                # -------- получаем данные с Open-Meteo --------
+                start = now
                 end = now + timedelta(hours=forecast_hours)
+                logger.info(f"Fetching forecast: {start.isoformat()} → +{forecast_hours}h")
 
-                logger.info(f"Fetching forecast: now → +{forecast_hours}h")
+                data = await self.fetch_weather(start, end)
 
-                data = await self.fetch_weather(now, end)
-                self.save_to_db(data)
+                # -------- фильтруем только forecast_hours --------
+                hourly = data.get("hourly", {})
+                times = hourly.get("time", [])
+                temps = hourly.get("temperature_2m", [])
+                humidity = hourly.get("relative_humidity_2m", [])
+                wind = hourly.get("wind_speed_10m", [])
+                gusts = hourly.get("wind_gusts_10m", [])
+                dew = hourly.get("dewpoint_2m", [])
+                radiation = hourly.get("shortwave_radiation", [])
+
+                # Индексы только для нужного горизонта
+                filtered_indexes = [
+                    i for i, t in enumerate(times)
+                    if datetime.fromisoformat(t) <= now + timedelta(hours=forecast_hours)
+                ]
+
+                # -------- сохраняем в БД --------
+                db: Session = SessionLocal()
+                try:
+                    for i in filtered_indexes:
+                        timestamp = datetime.fromisoformat(times[i])
+
+                        # защита от дублей
+                        exists = db.query(models.MeteoData) \
+                            .filter(models.MeteoData.timestamp == timestamp) \
+                            .first()
+                        if exists:
+                            continue
+
+                        record = models.MeteoData(
+                            timestamp=timestamp,
+                            temperature_2m=temps[i] if i < len(temps) else None,
+                            relative_humidity_2m=humidity[i] if i < len(humidity) else None,
+                            wind_speed_10m=wind[i] if i < len(wind) else None,
+                            wind_gusts_10m=gusts[i] if i < len(gusts) else None,
+                            dew_point_1m=dew[i] if i < len(dew) else None,
+                            shortwave_radiation=radiation[i] if i < len(radiation) else None,
+                            getting_timestamp=datetime.now()  # сохраняем время fetch
+                        )
+                        db.add(record)
+                    db.commit()
+                    logger.info(f"Meteo data saved: {len(filtered_indexes)} records")
+                except Exception as e:
+                    db.rollback()
+                    logger.error(f"DB error: {e}")
+                finally:
+                    db.close()
 
             except Exception as e:
                 logger.error(f"Fetch error: {e}")
 
-            await asyncio.sleep(interval_hours * 3600)
+            # -------- ждём следующий интервал --------
+            await asyncio.sleep(interval_hours/2 * 3600)
 
-    def start_auto(self, interval_hours: int = 3, forecast_hours: int = 24):
+    def start_auto(self, interval_hours: int = 6):
         """
-        Запуск автообновления
+        Запуск автообновления каждые interval_hours
+        с горизонтом прогноза = interval_hours
         """
         if self.running:
             return
 
         self.running = True
         self.task = asyncio.create_task(
-            self._auto_loop(interval_hours, forecast_hours)
+            self._auto_loop(interval_hours, interval_hours)
         )
 
     def stop_auto(self):

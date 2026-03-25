@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting MQTT service...")
     mqtt_service.start()
     logger.info("Starting METEO service...")
-    meteo_service.start_auto()
+    meteo_service.start_auto(4)
 
     yield
 
