@@ -32,3 +32,7 @@ class MeteoData(Base):
     wind_gusts_10m = Column(Float)
     dew_point_1m = Column(Float)
     shortwave_radiation = Column(Float)
+
+class RoomStateData(Base):
+    __tablename__ = "room_state_data"
+    id = Column(Integer, primary_key=True, index=True)
