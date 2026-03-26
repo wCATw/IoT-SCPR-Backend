@@ -155,8 +155,11 @@ class MeteoService:
 
     async def _auto_loop(self, interval_hours: int, forecast_hours: int):
         """
-        Автообновление прогноза - сохраняет ВСЕ прогнозы с разными getting_timestamp
+        Автообновление прогноза - сохраняет прогнозы с интервалом interval_hours/2
+        Проверяет, не были ли данные уже сохранены за последние interval_hours
         """
+        request_interval = interval_hours * 3600 / 2
+
         while self._running:
             try:
                 now = datetime.now()
@@ -176,27 +179,27 @@ class MeteoService:
                     logger.error(f"HTTP error {e.response.status_code}: {e.response.text}")
                     if e.response.status_code >= 500:
                         logger.warning("Server error, will retry on next cycle")
-                    await asyncio.sleep(interval_hours * 3600)
+                    await asyncio.sleep(request_interval)
                     continue
                 except httpx.RequestError as e:
                     logger.error(f"Network error: {e}")
-                    await asyncio.sleep(interval_hours * 3600)
+                    await asyncio.sleep(request_interval)
                     continue
                 except asyncio.TimeoutError:
                     logger.error("Request timeout")
-                    await asyncio.sleep(interval_hours * 3600)
+                    await asyncio.sleep(request_interval)
                     continue
 
                 hourly = data.get("hourly")
                 if not hourly:
                     logger.error("Invalid API response: missing 'hourly' field")
-                    await asyncio.sleep(interval_hours * 3600)
+                    await asyncio.sleep(request_interval)
                     continue
 
                 times = hourly.get("time", [])
                 if not times:
                     logger.warning("No time data in response")
-                    await asyncio.sleep(interval_hours * 3600)
+                    await asyncio.sleep(request_interval)
                     continue
 
                 current_hour_rounded = now.replace(minute=0, second=0, microsecond=0)
@@ -213,20 +216,91 @@ class MeteoService:
 
                 if not filtered_indexes:
                     logger.warning(f"No data in forecast horizon from {current_hour_rounded} to {end_time}")
-                    await asyncio.sleep(interval_hours * 3600)
+                    await asyncio.sleep(request_interval)
                     continue
 
-                saved_count = self._save_weather_data(hourly, filtered_indexes)
-                logger.info(f"Saved {saved_count} forecast records for hours: {[times[i] for i in filtered_indexes]}")
+                records_to_save = self._filter_recent_records(hourly, filtered_indexes, interval_hours)
 
-                await asyncio.sleep(interval_hours * 3600)
+                if not records_to_save:
+                    logger.info(f"No new records to save (all within last {interval_hours} hours)")
+                    await asyncio.sleep(request_interval)
+                    continue
+
+                saved_count = self._save_weather_data_with_indices(hourly, records_to_save)
+                logger.info(
+                    f"Saved {saved_count} new forecast records for hours: {[times[i] for i in records_to_save]}")
+                logger.info(f"Next update in {request_interval / 3600} hours")
+
+                await asyncio.sleep(request_interval)
 
             except asyncio.CancelledError:
                 logger.info("Auto-update task cancelled")
                 break
             except Exception as e:
                 logger.exception(f"Unexpected error in auto-update loop: {e}")
-                await asyncio.sleep(interval_hours * 3600)
+                await asyncio.sleep(request_interval)
+
+    def _filter_recent_records(self, hourly: dict, indices: list[int], interval_hours: int) -> list[int]:
+        """
+        Фильтрует записи, оставляя только те, которые не были сохранены за последние interval_hours часов
+        """
+        db: Session = SessionLocal()
+        try:
+            times = hourly.get("time", [])
+            cutoff_time = datetime.now() - timedelta(hours=interval_hours)
+
+            records_to_save = []
+
+            for i in indices:
+                timestamp_str = times[i]
+                timestamp = datetime.fromisoformat(timestamp_str)
+
+                existing_record = db.query(models.MeteoData).filter(
+                    models.MeteoData.timestamp == timestamp,
+                    models.MeteoData.getting_timestamp >= cutoff_time
+                ).first()
+
+                if not existing_record:
+                    records_to_save.append(i)
+                else:
+                    logger.debug(
+                        f"Record for {timestamp_str} already exists (saved at {existing_record.getting_timestamp})")
+
+            return records_to_save
+
+        except Exception as e:
+            logger.error(f"Error filtering recent records: {e}")
+            return []
+        finally:
+            db.close()
+
+    def _save_weather_data_with_indices(self, hourly: dict, indices: list[int]) -> int:
+        """Сохраняет выбранные индексы часовых данных в БД"""
+        db: Session = SessionLocal()
+        try:
+            times = hourly.get("time", [])
+            for i in indices:
+                if i < len(times):
+                    record = self._create_meteo_record(times[i], hourly, i)
+                    db.add(record)
+
+            db.commit()
+            logger.info(f"Meteo data saved: {len(indices)} records")
+            return len(indices)
+        except IntegrityError as e:
+            db.rollback()
+            logger.error(f"Database integrity error: {e}")
+            return 0
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"Database error: {e}")
+            return 0
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Unexpected DB error: {e}")
+            return 0
+        finally:
+            db.close()
 
     async def start_auto(self, interval_hours: int = 6):
         """
