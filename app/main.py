@@ -1,3 +1,5 @@
+import asyncio
+
 from app.core.config import FASTAPI_PORT, LATITUDE, LONGITUDE
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,15 +32,26 @@ async def lifespan(app: FastAPI):
     logger.info("Starting MQTT service...")
     mqtt_service.start()
     logger.info("Starting METEO service...")
-    meteo_service.start_auto(4)
+    try:
+        await asyncio.wait_for(meteo_service.start_auto(4), timeout=10.0)
+        logger.info("METEO service started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start METEO service: {e}")
 
     yield
 
     # --- shutdown ---
+    logger.info("Stopping services...")
+    try:
+        await asyncio.wait_for(meteo_service.stop_auto(timeout=5.0), timeout=7.0)
+        logger.info("METEO service stopped")
+    except Exception as e:
+        logger.error(f"Error stopping METEO service: {e}")
     logger.info("Stopping MQTT service...")
-    mqtt_service.stop()
-    logger.info("Starting METEO service...")
-    meteo_service.stop_auto()
+    try:
+        mqtt_service.stop()
+    except Exception as e:
+        logger.error(f"Error stopping MQTT service: {e}")
 
 
 app = FastAPI(lifespan=lifespan)

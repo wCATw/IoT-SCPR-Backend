@@ -166,12 +166,10 @@ class MeteoService:
                 end = now + timedelta(hours=forecast_hours)
                 logger.info(f"Fetching forecast: {start.isoformat()} → +{forecast_hours}h")
 
-                # HTTP запрос с отдельной обработкой ошибок сети
                 try:
                     data = await self.fetch_with_retry(start, end)
                 except httpx.HTTPStatusError as e:
                     logger.error(f"HTTP error {e.response.status_code}: {e.response.text}")
-                    # Добавляем логику повтора для временных ошибок (5xx)
                     if e.response.status_code >= 500:
                         logger.warning("Server error, will retry on next cycle")
                     await asyncio.sleep(interval_hours * 3600)
@@ -198,7 +196,6 @@ class MeteoService:
                     await asyncio.sleep(interval_hours * 3600)
                     continue
 
-                # Индексы только для нужного горизонта
                 filtered_indexes = [
                     i for i, t in enumerate(times)
                     if datetime.fromisoformat(t) <= now + timedelta(hours=forecast_hours)
@@ -209,15 +206,16 @@ class MeteoService:
                     await asyncio.sleep(interval_hours * 3600)
                     continue
 
-                # Сохранение в БД с отдельной обработкой ошибок
                 saved_count = self._save_weather_data(hourly, filtered_indexes)
                 logger.info(f"Saved {saved_count} forecast records")
+
+                # ========== ВАЖНО: Ждем указанный интервал ==========
+                await asyncio.sleep(interval_hours * 3600)
 
             except asyncio.CancelledError:
                 logger.info("Auto-update task cancelled")
                 break
             except Exception as e:
-                # Непредвиденная ошибка - логируем с traceback для отладки
                 logger.exception(f"Unexpected error in auto-update loop: {e}")
                 await asyncio.sleep(interval_hours * 3600)
 
@@ -231,7 +229,6 @@ class MeteoService:
                 logger.warning("Auto-update already running")
                 return
 
-            # Проверяем, что предыдущая задача действительно завершена
             if self._task and not self._task.done():
                 logger.warning("Previous task still running, cancelling...")
                 self._task.cancel()
