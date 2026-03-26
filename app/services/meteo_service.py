@@ -161,13 +161,17 @@ class MeteoService:
             try:
                 now = datetime.now()
 
-                # -------- получаем данные с Open-Meteo --------
                 start = now
                 end = now + timedelta(hours=forecast_hours)
-                logger.info(f"Fetching forecast: {start.isoformat()} → +{forecast_hours}h")
+
+                start_date = start.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_date = end.replace(hour=0, minute=0, second=0, microsecond=0)
+
+                logger.info(f"Fetching forecast: from {start.isoformat()} to {end.isoformat()}")
+                logger.info(f"API date range: {start_date.date()} to {end_date.date()}")
 
                 try:
-                    data = await self.fetch_with_retry(start, end)
+                    data = await self.fetch_weather(start_date, end_date)
                 except httpx.HTTPStatusError as e:
                     logger.error(f"HTTP error {e.response.status_code}: {e.response.text}")
                     if e.response.status_code >= 500:
@@ -183,7 +187,6 @@ class MeteoService:
                     await asyncio.sleep(interval_hours * 3600)
                     continue
 
-                # -------- фильтруем только forecast_hours --------
                 hourly = data.get("hourly")
                 if not hourly:
                     logger.error("Invalid API response: missing 'hourly' field")
@@ -196,20 +199,26 @@ class MeteoService:
                     await asyncio.sleep(interval_hours * 3600)
                     continue
 
-                filtered_indexes = [
-                    i for i, t in enumerate(times)
-                    if datetime.fromisoformat(t) <= now + timedelta(hours=forecast_hours)
-                ]
+                current_hour_rounded = now.replace(minute=0, second=0, microsecond=0)
+                if now.minute > 0 or now.second > 0 or now.microsecond > 0:
+                    current_hour_rounded += timedelta(hours=1)
+
+                end_time = now + timedelta(hours=forecast_hours)
+
+                filtered_indexes = []
+                for i, t in enumerate(times):
+                    timestamp = datetime.fromisoformat(t)
+                    if current_hour_rounded <= timestamp <= end_time:
+                        filtered_indexes.append(i)
 
                 if not filtered_indexes:
-                    logger.warning("No data in forecast horizon")
+                    logger.warning(f"No data in forecast horizon from {current_hour_rounded} to {end_time}")
                     await asyncio.sleep(interval_hours * 3600)
                     continue
 
                 saved_count = self._save_weather_data(hourly, filtered_indexes)
-                logger.info(f"Saved {saved_count} forecast records")
+                logger.info(f"Saved {saved_count} forecast records for hours: {[times[i] for i in filtered_indexes]}")
 
-                # ========== ВАЖНО: Ждем указанный интервал ==========
                 await asyncio.sleep(interval_hours * 3600)
 
             except asyncio.CancelledError:
