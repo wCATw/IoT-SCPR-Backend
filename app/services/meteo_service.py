@@ -15,6 +15,7 @@ class MeteoService:
         self.latitude = latitude
         self.longitude = longitude
         self.base_url = "https://api.open-meteo.com/v1/forecast"
+        self.http_timeout = httpx.Timeout(10.0, connect=5.0)
 
         self._lock = asyncio.Lock()
         self._running = False
@@ -59,6 +60,9 @@ class MeteoService:
         finally:
             db.close()
 
+    def _now(self) -> datetime:
+        return datetime.now()
+
     # =========================
     # HTTP
     # =========================
@@ -77,10 +81,9 @@ class MeteoService:
             ]),
             "start_date": start.strftime("%Y-%m-%d"),
             "end_date": end.strftime("%Y-%m-%d"),
-            "timezone": "auto"
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=self.http_timeout) as client:
             r = await client.get(self.base_url, params=params)
             r.raise_for_status()
             return r.json()
@@ -101,14 +104,14 @@ class MeteoService:
     # =========================
 
     async def load_history(self, days_back: int):
-        end = datetime.now()
+        end = self._now()
         start = end - timedelta(days=days_back)
 
         data = await self.fetch_with_retry(start, end)
         hourly = data.get("hourly", {})
         times = hourly.get("time", [])
 
-        self._save(hourly, list(range(len(times))))
+        await asyncio.to_thread(self._save, hourly, list(range(len(times))))
 
     # =========================
     # auto loop
@@ -119,7 +122,7 @@ class MeteoService:
 
         while self._running:
             try:
-                now = datetime.now()
+                now = self._now()
 
                 start = now
                 end = now + timedelta(hours=forecast_hours)
@@ -151,7 +154,7 @@ class MeteoService:
                     logger.warning("No forecast in range")
                     continue
 
-                saved = self._save(hourly, indices)
+                saved = await asyncio.to_thread(self._save, hourly, indices)
                 logger.info(f"Saved {saved} records")
 
             except asyncio.CancelledError:
